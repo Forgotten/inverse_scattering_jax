@@ -1,0 +1,60 @@
+# Helmholtz Solver JAX
+
+A high-performance, matrix-free Helmholtz solver and inverse scattering framework implemented in JAX.
+
+## Features
+
+- **Helmholtz Operators**: Different Implementations of the Helmholtz operator using JAX's `vmap` and `jit`, supporting both forward and adjoint modes.
+- **GMRES Solver**: Solves the linear system using jax.scipy's GMRES implementation.
+- **Custom Adjoint**: Implements a custom VJP (Vector-Jacobian Product) for the forward problem, enabling efficient PDE-constrained optimization.
+- **Inverse Scattering**: Includes utilities for solving inverse problems using `jaxopt` (e.g., L-BFGS).
+- **PML Support**: Absorbing boundary conditions via Perfectly Matched Layers.
+
+## Installation
+
+This project requires JAX and JAXOpt.
+
+```bash
+pip install jax jaxlib jaxopt
+```
+
+Or install the package in editable mode:
+
+```bash
+pip install -e .
+```
+
+## Project Structure
+
+```text
+.
+├── LICENSE
+├── README.md
+├── inverse_scattering_jax
+│   ├── src
+│   │   ├── helmholtz.py               # Physics-based solver and operators
+│   │   └── inverse_scattering.py      # Forward/inverse model logic
+│   └── tests
+│       ├── test_forward.py            # Forward model & adjoint tests
+│       └── test_inverse_scattering.py # Full pipeline & gradient tests
+├── notebooks
+│   ├── benchmarking_modes.ipynb       # Performance benchmarks
+│   ├── forward_demo.ipynb             # Forward simulation demo
+│   └── inverse_reconstruction.ipynb   # Inverse scattering demo
+└── pyproject.toml                     # Project metadata and dependencies
+```
+
+## Usage
+
+- Check out `notebooks/forward_demo.ipynb` for a complete example of how to use the forward problem.
+- Check out `notebooks/inverse_reconstruction.ipynb` for a demonstration of the full inverse scattering pipeline reconstructing multiple Gaussian bumps.
+
+To run the tests (if not installed, use `PYTHONPATH=.` prefix):
+
+```bash
+python3 -m unittest discover inverse_scattering_jax/tests
+```
+
+## License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.

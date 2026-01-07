@@ -1,0 +1,31 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "inverse_scattering_jax"
+version = "0.1.0"
+authors = [
+  { name="Leonardo Zepeda-Nunez", email="lzepeda@melix.org" },
+]
+description = "A JAX-based Finite-Difference Helmholtz solver for inverse scattering."
+readme = "README.md"
+requires-python = ">=3.12"
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Topic :: Scientific/Engineering :: Mathematics",
+]
+dependencies = [
+    "jax",
+    "jaxlib",
+    "jaxopt",
+    "numpy",
+    "scipy",
+    "matplotlib",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["inverse_scattering_jax*"]
