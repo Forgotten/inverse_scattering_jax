@@ -1,4 +1,4 @@
-from .src.helmholtz import HelmholtzSolver, GMRESOptions, extend_model
+from .src.helmholtz import HelmholtzSolver, HelmholtzOperator, GMRESOptions, extend_model
 from .src.inverse_scattering import (
   IncomingDirections,
   ForwardModel,

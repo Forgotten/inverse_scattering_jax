@@ -2,7 +2,7 @@ import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, GMRESOptions
+from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, HelmholtzOperator, GMRESOptions
 from inverse_scattering_jax.src.inverse_scattering import (
   IncomingDirections, 
   create_forward_with_adjoint, 
@@ -51,12 +51,13 @@ class TestForwardProblem(parameterized.TestCase):
     m_ext = 1.0 + jax.random.normal(key, (self.ny, self.nx), 
                                    dtype=jnp.float64 if dtype==jnp.complex128 else jnp.float32) * 0.1
     
-    solver = HelmholtzSolver(
+    op = HelmholtzOperator(
       self.nx, self.ny, self.npml, self.h, self.omega, 
       self.sigma_max, self.order, mode=mode, dtype=dtype
     )
-    Au = solver.operator(u_vec, m_ext)
-    Adv = solver.hermitian_operator(v_vec, m_ext)
+    # Using solver interface just for operator access if needed, but testing operator directly
+    Au = op.operator(u_vec, m_ext)
+    Adv = op.operator_adjoint(v_vec, m_ext)
     
     inner1 = jnp.vdot(v_vec, Au)
     inner2 = jnp.vdot(Adv, u_vec)
@@ -71,17 +72,17 @@ class TestForwardProblem(parameterized.TestCase):
     u_vec = jax.random.normal(key, (self.nx * self.ny,))
     m_ext = 1.0 + jax.random.normal(key, (self.ny, self.nx)) * 0.1
     
-    solver_ref = HelmholtzSolver(
+    op_ref = HelmholtzOperator(
       self.nx, self.ny, self.npml, self.h, self.omega, 
       self.sigma_max, self.order, mode='matrix'
     )
-    res_ref = solver_ref.operator(u_vec, m_ext)
+    res_ref = op_ref.operator(u_vec, m_ext)
     
-    solver = HelmholtzSolver(
+    op = HelmholtzOperator(
       self.nx, self.ny, self.npml, self.h, self.omega, 
       self.sigma_max, self.order, mode=mode
     )
-    res = solver.operator(u_vec, m_ext)
+    res = op.operator(u_vec, m_ext)
       
     diff = jnp.linalg.norm(res_ref - res) / jnp.linalg.norm(res_ref)
     self.assertLess(float(diff), 1e-6)
@@ -89,10 +90,13 @@ class TestForwardProblem(parameterized.TestCase):
   def test_vjp(self) -> None:
     """Verify the custom VJP via finite differences."""
     dtype = jnp.complex128
-    solver = HelmholtzSolver(
+    op = HelmholtzOperator(
       self.nx, self.ny, self.npml, self.h, self.omega, 
       self.sigma_max, self.order, mode='stencil', dtype=dtype
     )
+    # Solver needs operator and options
+    solver = HelmholtzSolver(op, gmres_options=GMRESOptions())
+    
     forward_fun = create_forward_with_adjoint(solver, self.inc, self.projection_op)
     
     eta = jnp.zeros(self.nxint * self.nyint, dtype=jnp.float64)
@@ -113,10 +117,12 @@ class TestForwardProblem(parameterized.TestCase):
     self.assertAlmostEqual(float(expected_diff), float(actual_diff), places=4)
 
   def test_forward_output_shape(self) -> None:
-    solver = HelmholtzSolver(
+    op = HelmholtzOperator(
       self.nx, self.ny, self.npml, self.h, self.omega, 
       self.sigma_max, self.order, mode='stencil'
     )
+    solver = HelmholtzSolver(op)
+    
     forward_fun = create_forward_with_adjoint(solver, self.inc, self.projection_op)
     eta = jnp.zeros(self.nxint * self.nyint)
     scattered = forward_fun(eta)

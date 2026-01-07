@@ -4,7 +4,7 @@ config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import unittest
 from inverse_scattering_jax.src.helmholtz import (
-  HelmholtzSolver, extend_model, Array
+  HelmholtzSolver, HelmholtzOperator, extend_model, Array
 )
 from inverse_scattering_jax.src.inverse_scattering import (
   IncomingDirections, 
@@ -29,9 +29,10 @@ class TestInverseScattering(unittest.TestCase):
     order: int = 2
     
     # Solver.
-    solver = HelmholtzSolver(
+    op = HelmholtzOperator(
       nx, ny, npml, h, omega, sigma_max, order, mode='stencil'
     )
+    solver = HelmholtzSolver(op)
     
     # Incoming directions.
     n_theta: int = 4
@@ -89,7 +90,8 @@ class TestInverseScattering(unittest.TestCase):
     h = 1.0 / (nxint - 1)
     omega, sigma_max = 2.0, 10.0
     
-    solver = HelmholtzSolver(nx, ny, npml, h, omega, sigma_max, mode='stencil')
+    op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='stencil')
+    solver = HelmholtzSolver(op)
     inc = IncomingDirections(nx, ny, npml, h, omega, n_theta=4)
     
     # Random sampling points.

@@ -2,7 +2,7 @@ import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from inverse_scattering_jax.src.helmholtz import HelmholtzSolver
+from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, HelmholtzOperator
 from scipy.special import hankel1
 import unittest
 
@@ -17,7 +17,8 @@ class TestNumericalValidation(unittest.TestCase):
       omega = 5.0
       sigma_max = 40.0
       
-      solver = HelmholtzSolver(nx, ny, npml, h, omega, sigma_max, mode='matrix')
+      op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='matrix')
+      solver = HelmholtzSolver(op)
       
       # Source at center.
       f = jnp.zeros((ny, nx))
@@ -62,7 +63,8 @@ class TestNumericalValidation(unittest.TestCase):
     omega = 10.0
     sigma_max = 30.0
     
-    solver = HelmholtzSolver(nx, ny, npml, h, omega, sigma_max, mode='stencil')
+    op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='stencil')
+    solver = HelmholtzSolver(op)
     
     # Source at center.
     src_idx_x, src_idx_y = nx // 2, ny // 2
@@ -102,7 +104,8 @@ class TestNumericalValidation(unittest.TestCase):
     omega = 8.0
     sigma_max = 40.0
     
-    solver = HelmholtzSolver(nx, ny, npml, h, omega, sigma_max, mode='stencil')
+    op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='stencil')
+    solver = HelmholtzSolver(op)
     
     # Source near one corner (but inside interior).
     f = jnp.zeros((ny, nx))

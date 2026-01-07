@@ -5,14 +5,78 @@ from jax import lax
 import jax.scipy.sparse.linalg as sp_linalg
 from functools import partial
 import dataclasses
-from typing import Tuple, Optional, Callable, Any, Union, Literal
+from typing import Tuple, Optional, Callable, Any, Union, Literal, Protocol
 
 # Custom type aliases.
 Array = jax.Array
 
+class Operator(Protocol):
+  """Protocol for a linear operator."""
+  
+  def operator(self, u_vec: Array, m_ext: Array) -> Array:
+    """Applies the operator A(m) u.
+    
+    Args:
+      u_vec: Input vector (flattened).
+      m_ext: Extended model parameters.
+      
+    Returns:
+      Result of the operator application.
+    """
+    ...
+
+  def operator_adjoint(self, w_vec: Array, m_ext: Array) -> Array:
+    """Applies the adjoint operator A(m)^H w.
+    
+    Args:
+      w_vec: Input adjoint vector (flattened).
+      m_ext: Extended model parameters.
+      
+    Returns:
+      Result of the adjoint operator application.
+    """
+    ...
+
+  @property
+  def dtype(self) -> Any:
+    """Datatype for the computation and results."""
+    ...
+
+class LinearSolver(Protocol):
+  """Protocol for a linear solver."""
+  
+  def solve(
+    self, f_vec: Array, m_ext: Array, x0: Optional[Array] = None
+  ) -> Tuple[Array, Any]:
+    """Solves the linear system A(m) u = f.
+    
+    Args:
+      f_vec: Right-hand side vector (flattened).
+      m_ext: Extended model parameters.
+      x0: Optional initial guess.
+      
+    Returns:
+      Tuple of (solution vector, solver info).
+    """
+    ...
+
+  def solve_hermitian_adjoint(
+    self, g_vec: Array, m_ext: Array, x0: Optional[Array] = None
+  ) -> Tuple[Array, Any]:
+    """Solves the adjoint linear system A(m)^H w = g.
+    
+    Args:
+      g_vec: Right-hand side adjoint vector (flattened).
+      m_ext: Extended model parameters.
+      x0: Optional initial guess.
+      
+    Returns:
+      Tuple of (solution vector, solver info).
+    """
+    ...
+
 def fd_weights(z: float, x: Array, m: int) -> Array:
-  """
-  Finite-difference weights (Fornberg algorithm).
+  """Finite-difference weights (Fornberg algorithm).
 
   Args:
     z: Expansion point.
@@ -51,8 +115,7 @@ def fd_weights(z: float, x: Array, m: int) -> Array:
   return c[:, m]
 
 def get_fd_1d_matrix(n: int, h: float, order: int, deriv: int) -> Array:
-  """
-  Returns a sparse matrix (as a dense matrix) for the 1D FD operator.
+  """Returns a sparse matrix (as a dense matrix) for the 1D FD operator.
 
   Args:
     n: Grid size.
@@ -89,8 +152,7 @@ def get_fd_1d_matrix(n: int, h: float, order: int, deriv: int) -> Array:
 def distrib_pml(
   nx: int, ny: int, npml: int, fac: float
 ) -> Tuple[Array, Array, Array, Array]:
-  """
-  Generates PML coefficients for the grid.
+  """Generates PML coefficients for the grid.
 
   Args:
     nx: Grid size in x.
@@ -117,8 +179,7 @@ def distrib_pml(
   return sigma_x, sigma_y, sigma_xp, sigma_yp
 
 def extend_model(m: Array, nxint: int, nyint: int, npml: int) -> Array:
-  """
-  Extends the model from the interior to the full domain (including PML).
+  """Extends the model from the interior to the full domain (including PML).
 
   Args:
     m: Interior model parameters.
@@ -147,9 +208,8 @@ class GMRESOptions:
   tol: float = 1e-3
   maxiter: int = 1000
 
-class HelmholtzSolver:
-  """
-  High-performance Helmholtz solver using JAX.
+class HelmholtzOperator:
+  """Helmholtz operator using JAX.
 
   Attributes:
     nx: Total grid size in x.
@@ -160,7 +220,9 @@ class HelmholtzSolver:
     sigma_max: Maximum PML damping.
     order: Accuracy order.
     mode: Operator implementation mode ('matrix', 'stencil', 'conv').
-    gmres_options: Options for the GMRES solver.
+        'matrix': dense matrix representation per dimension.
+        'stencil': stencil representation for matrix-free multiplication.
+        'conv': convolution representation.
     dtype: Datatype for the computation and results.
   """
   def __init__(
@@ -172,11 +234,10 @@ class HelmholtzSolver:
     omega: float, 
     sigma_max: float, 
     order: int = 2,
-    gmres_options: GMRESOptions = GMRESOptions(),
     mode: Literal['matrix', 'stencil', 'conv'] = 'matrix',
     dtype: Any = jnp.complex128
   ):
-    """Initializes the Helmholtz solver."""
+    """Initializes the Helmholtz operator."""
     self.nx = nx
     self.ny = ny
     self.npml = npml
@@ -185,8 +246,8 @@ class HelmholtzSolver:
     self.sigma_max = sigma_max
     self.order = order
     self.mode = mode
-    self.gmres_options = gmres_options
-    self.dtype = dtype
+    self.mode = mode
+    self._dtype = dtype
     
     self.sx, self.sy, self.sxp, self.syp = distrib_pml(nx, ny, npml, sigma_max)
     
@@ -235,10 +296,14 @@ class HelmholtzSolver:
       self.Dxx1d = get_fd_1d_matrix(nx, h, order, 2).astype(dtype)
       self.Dyy1d = get_fd_1d_matrix(ny, h, order, 2).astype(dtype)
 
+  @property
+  def dtype(self) -> Any:
+    """Datatype for the computation and results."""
+    return self._dtype
+
   @partial(jax.jit, static_argnums=(0, 2, 3))
   def _apply_2d_core(self, u: Array, dim: int, deriv: int) -> Array:
-    """
-    Core 2D operator application for stencil or conv modes.
+    """Core 2D operator application for stencil or conv modes.
 
     Args:
       u: Input 2D field.
@@ -269,7 +334,7 @@ class HelmholtzSolver:
             res = res.at[:, -d:].add(weights[i] * u[:, :d])
           else:
             res = res.at[-d:, :].add(weights[i] * u[:d, :])
-            
+
     elif self.mode == 'conv':
       if dim == 0: # x-direction
         kernel = weights.reshape((1, 1, 1, -1))
@@ -300,8 +365,7 @@ class HelmholtzSolver:
   def _apply_derivative(
     self, u: Array, dim: int, deriv: int, adjoint: bool = False
   ) -> Array:
-    """
-    Applies the derivative operator along a dimension.
+    """Applies the derivative operator along a dimension.
 
     Args:
       u: Input 2D field.
@@ -329,10 +393,6 @@ class HelmholtzSolver:
       return apply_f(u)
     else:
       def adj_fun(field):
-        # The adjoint of A for complex inner product is conj(VJP(conj(seed))).
-        # JAX's VJP by default computes the transpose (for real) or 
-        # a specific complex Jacobian product. For complex Hermitian adjoint,
-        # we need this specific conjugation pattern.
         _, vjp_fun = jax.vjp(apply_f, jnp.zeros_like(field))
         return jnp.conj(vjp_fun(jnp.conj(field))[0])
       return adj_fun(u)
@@ -359,8 +419,7 @@ class HelmholtzSolver:
 
   @partial(jax.jit, static_argnums=(0,))
   def operator(self, u_vec: Array, m_ext: Array) -> Array:
-    """
-    Applies the Helmholtz operator A(m) u.
+    """Applies the Helmholtz operator A(m) u.
 
     Args:
       u_vec: Input field (flattened).
@@ -378,9 +437,8 @@ class HelmholtzSolver:
     return res.flatten()
 
   @partial(jax.jit, static_argnums=(0,))
-  def hermitian_operator(self, w_vec: Array, m_ext: Array) -> Array:
-    """
-    Applies the Hermitian adjoint Helmholtz operator A(m)^H w.
+  def operator_adjoint(self, w_vec: Array, m_ext: Array) -> Array:
+    """Applies the Hermitian adjoint Helmholtz operator A(m)^H w.
 
     Args:
       w_vec: Input adjoint field (flattened).
@@ -397,12 +455,53 @@ class HelmholtzSolver:
     res += self._apply_derivative(jnp.conj(self.ay) * w, 1, 2, adjoint=True)
     return res.flatten()
 
+
+class HelmholtzSolver:
+  """Helmholtz solver that composes an Operator and a linear solver strategy.
+  
+  Attributes:
+    op: The Helmholtz operator instance.
+    gmres_options: Options for the GMRES solver.
+  """
+  def __init__(
+    self, 
+    op: Operator, 
+    gmres_options: GMRESOptions = GMRESOptions()
+  ):
+    """Initializes the solver with an operator and options."""
+    self.op = op
+    self.gmres_options = gmres_options
+
+  @property
+  def nx(self): 
+    """Grid size in x."""
+    return self.op.nx
+
+  @property
+  def ny(self): 
+    """Grid size in y."""
+    return self.op.ny
+
+  @property
+  def npml(self): 
+    """Number of PML layers."""
+    return self.op.npml
+
+  @property
+  def h(self): 
+    """Grid spacing."""
+    return self.op.h
+
+  @property
+  def omega(self): 
+    """Angular frequency."""
+    return self.op.omega
+  
   @partial(jax.jit, static_argnums=(0,))
   def solve(
     self, f_vec: Array, m_ext: Array, x0: Optional[Array] = None
   ) -> Tuple[Array, Any]:
-    """
-    Solves the forward Helmholtz problem.
+    """Solves the forward Helmholtz problem for a single RHS.
 
     Args:
       f_vec: RHS vector (flattened).
@@ -413,14 +512,15 @@ class HelmholtzSolver:
       Tuple of (solution, info).
     """
     # Ensure output-compatible dtypes.
-    f_vec = f_vec.astype(self.dtype)
+    # Ensure output-compatible dtypes.
+    f_vec = f_vec.astype(self.op.dtype)
     if x0 is not None:
-      x0 = x0.astype(self.dtype)
+      x0 = x0.astype(self.op.dtype)
 
-    def op(u): return self.operator(u, m_ext)
+    def op_fun(u): return self.op.operator(u, m_ext)
     gmres_kwargs = dataclasses.asdict(self.gmres_options)
     sol, info = sp_linalg.gmres(
-      op, f_vec, x0=x0, **gmres_kwargs
+      op_fun, f_vec, x0=x0, **gmres_kwargs
     )
     return sol, info
 
@@ -428,8 +528,7 @@ class HelmholtzSolver:
   def solve_hermitian_adjoint(
     self, g_vec: Array, m_ext: Array, x0: Optional[Array] = None
   ) -> Tuple[Array, Any]:
-    """
-    Solves the adjoint Helmholtz problem.
+    """Solves the adjoint Helmholtz problem for a single RHS.
 
     Args:
       g_vec: RHS adjoint vector (flattened).
@@ -440,13 +539,13 @@ class HelmholtzSolver:
       Tuple of (solution, info).
     """
     # Ensure output-compatible dtypes.
-    g_vec = g_vec.astype(self.dtype)
+    g_vec = g_vec.astype(self.op.dtype)
     if x0 is not None:
-      x0 = x0.astype(self.dtype)
+      x0 = x0.astype(self.op.dtype)
 
-    def op(w): return self.hermitian_operator(w, m_ext)
+    def op_fun(w): return self.op.operator_adjoint(w, m_ext)
     gmres_kwargs = dataclasses.asdict(self.gmres_options)
     sol, info = sp_linalg.gmres(
-      op, g_vec, x0=x0, **gmres_kwargs
+      op_fun, g_vec, x0=x0, **gmres_kwargs
     )
     return sol, info
