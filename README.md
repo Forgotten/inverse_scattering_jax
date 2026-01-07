@@ -1,6 +1,7 @@
-# Helmholtz Solver JAX
+# Inverse Scattering JAX
 
-A high-performance, matrix-free Helmholtz solver and inverse scattering framework implemented in JAX.
+ An inverse scattering framework implemented in JAX using a finite difference 
+ discretization of the Helmholtz operator.
 
 ## Features
 
@@ -46,8 +47,9 @@ pip install -e .
 
 ## Usage
 
-- Check out `notebooks/forward_demo.ipynb` for a complete example of how to use the forward problem.
-- Check out `notebooks/inverse_reconstruction.ipynb` for a demonstration of the full inverse scattering pipeline reconstructing multiple Gaussian bumps.
+- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Forgotten/inverse_scattering_jax/blob/main/notebooks/forward_demo.ipynb) Check out `notebooks/forward_demo.ipynb` for a complete example of how to use the forward problem.
+- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Forgotten/inverse_scattering_jax/blob/main/notebooks/inverse_reconstruction.ipynb) Check out `notebooks/inverse_reconstruction.ipynb` for a demonstration of the full inverse scattering pipeline reconstructing multiple Gaussian bumps.
+- [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Forgotten/inverse_scattering_jax/blob/main/notebooks/benchmarking_modes.ipynb) Check out `notebooks/benchmarking_modes.ipynb` for performance benchmarks of the different solver modes.
 
 To run the tests (if not installed, use `PYTHONPATH=.` prefix):
 
