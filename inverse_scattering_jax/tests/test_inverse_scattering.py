@@ -55,7 +55,7 @@ class TestInverseScattering(unittest.TestCase):
     
     # True perturbation (a small square).
     eta_true: Array = jnp.zeros((nyint, nxint))
-    eta_true = eta_true.at[nyint//4:nyint//2, nxint//4:nxint//2].set(0.1)
+    eta_true = eta_true.at[nyint//4:nyint//2, nxint//4:nxint//2].set(1.0)
     eta_true_flat: Array = eta_true.flatten()
     
     # Generate "data".
@@ -95,7 +95,7 @@ class TestInverseScattering(unittest.TestCase):
     inc = IncomingDirections(nx, ny, npml, h, omega, n_theta=4)
     
     # Random sampling points.
-    theta_r = jnp.linspace(0, 2 * jnp.pi, 5)
+    theta_r = jnp.linspace(0, 2 * jnp.pi, 5, endpoint=False)
     points_query = 0.4 * jnp.stack([jnp.cos(theta_r), jnp.sin(theta_r)], axis=1)
     x = (jnp.arange(nx) - npml - nxint//2) * h
     y = (jnp.arange(ny) - npml - nyint//2) * h
@@ -108,8 +108,8 @@ class TestInverseScattering(unittest.TestCase):
     
     # Random model and perturbation.
     key = jax.random.PRNGKey(42)
-    eta = jax.random.normal(key, (nxint * nyint,)) * 0.01
-    v = jax.random.normal(key, (nxint * nyint,)) * 0.01
+    eta = jax.random.normal(key, (nxint * nyint,)) * 1.0
+    v = jax.random.normal(key, (nxint * nyint,)) * 1.0
     
     def objective(e):
       return misfit(e, forward_fun, data)

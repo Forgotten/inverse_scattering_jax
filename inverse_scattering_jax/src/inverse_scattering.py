@@ -163,11 +163,11 @@ def create_forward_with_adjoint(
       sol, _ = solver.solve(b, m_ext)
       return sol
     
-    U = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
-    return projection_op(U)
+    u_0 = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
+    return projection_op(u_0)
 
   def forward_fwd(eta: Array) -> Tuple[Array, Tuple[Array, Array]]:
-    U_scattered = forward_fun(eta)
+    u_0_scattered = forward_fun(eta)
     nxi = solver.nx - 2 * solver.npml
     nyi = solver.ny - 2 * solver.npml
     eta_ext = extend_model(eta, nxi, nyi, solver.npml)
@@ -178,11 +178,12 @@ def create_forward_with_adjoint(
       sol, _ = solver.solve(b, m_ext)
       return sol
       
-    U = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
-    return U_scattered, (eta, U)
+    u_0 = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
+    return u_0_scattered, (eta, u_0)
 
   def forward_bwd(res: Tuple[Array, Array], v: Array) -> Tuple[Array]:
-    eta, U = res
+    """Custom application of the adjoint of the Jacobian."""
+    eta, u_0 = res
     nxi = solver.nx - 2 * solver.npml
     nyi = solver.ny - 2 * solver.npml
     npml = solver.npml
@@ -190,7 +191,8 @@ def create_forward_with_adjoint(
     eta_ext = extend_model(eta, nxi, nyi, npml)
     m_ext = 1.0 + eta_ext
     
-    _, vjp_proj = jax.vjp(projection_op, U)
+    # check if this is correct.
+    _, vjp_proj = jax.vjp(projection_op, u_0)
     pt_v = vjp_proj(v)[0]
     
     def solve_adj_one(b):
@@ -198,8 +200,8 @@ def create_forward_with_adjoint(
       return sol
       
     W = jax.vmap(solve_adj_one, in_axes=1, out_axes=1)(pt_v)
-    U_total = U + inc.U_in
-    grad_ext = - jnp.real(
+    U_total = u_0 + inc.U_in
+    grad_ext = jnp.real(
       jnp.sum(jnp.conj(U_total) * W, axis=1)
     ) * (solver.omega**2)
     grad_ext = grad_ext.reshape((solver.ny, solver.nx))
