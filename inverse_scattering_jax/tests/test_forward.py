@@ -24,7 +24,7 @@ class TestForwardProblem(parameterized.TestCase):
     
     self.n_theta = 4
     self.inc = IncomingDirections(
-      self.nx, self.ny, self.npml, self.h, self.omega, self.n_theta
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, n_theta=self.n_theta
     )
     
     # Sampling points.
@@ -52,8 +52,8 @@ class TestForwardProblem(parameterized.TestCase):
                                    dtype=jnp.float64 if dtype==jnp.complex128 else jnp.float32) * 0.1
     
     op = HelmholtzOperator(
-      self.nx, self.ny, self.npml, self.h, self.omega, 
-      self.sigma_max, self.order, mode=mode, dtype=dtype
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      sigma_max=self.sigma_max, order=self.order, mode=mode, dtype=dtype
     )
     # Using solver interface just for operator access if needed, but testing operator directly
     Au = op.operator(u_vec, m_ext)
@@ -73,14 +73,14 @@ class TestForwardProblem(parameterized.TestCase):
     m_ext = 1.0 + jax.random.normal(key, (self.ny, self.nx)) * 0.1
     
     op_ref = HelmholtzOperator(
-      self.nx, self.ny, self.npml, self.h, self.omega, 
-      self.sigma_max, self.order, mode='matrix'
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      sigma_max=self.sigma_max, order=self.order, mode='matrix'
     )
     res_ref = op_ref.operator(u_vec, m_ext)
     
     op = HelmholtzOperator(
-      self.nx, self.ny, self.npml, self.h, self.omega, 
-      self.sigma_max, self.order, mode=mode
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      sigma_max=self.sigma_max, order=self.order, mode=mode
     )
     res = op.operator(u_vec, m_ext)
       
@@ -91,11 +91,11 @@ class TestForwardProblem(parameterized.TestCase):
     """Verify the custom VJP via finite differences."""
     dtype = jnp.complex128
     op = HelmholtzOperator(
-      self.nx, self.ny, self.npml, self.h, self.omega, 
-      self.sigma_max, self.order, mode='stencil', dtype=dtype
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      sigma_max=self.sigma_max, order=self.order, mode='stencil', dtype=dtype
     )
     # Solver needs operator and options
-    solver = HelmholtzSolver(op, gmres_options=GMRESOptions())
+    solver = HelmholtzSolver(op=op, gmres_options=GMRESOptions())
     
     forward_fun = create_forward_with_adjoint(solver, self.inc, self.projection_op)
     
@@ -118,15 +118,71 @@ class TestForwardProblem(parameterized.TestCase):
 
   def test_forward_output_shape(self) -> None:
     op = HelmholtzOperator(
-      self.nx, self.ny, self.npml, self.h, self.omega, 
-      self.sigma_max, self.order, mode='stencil'
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      sigma_max=self.sigma_max, order=self.order, mode='stencil'
     )
-    solver = HelmholtzSolver(op)
+    solver = HelmholtzSolver(op=op)
     
     forward_fun = create_forward_with_adjoint(solver, self.inc, self.projection_op)
     eta = jnp.zeros(self.nxint * self.nyint)
     scattered = forward_fun(eta)
     self.assertEqual(scattered.shape, (self.points_query.shape[0], self.n_theta))
+
+  def test_jacobian_adjoint(self) -> None:
+    """Check that <Jv, w> = <v, J^H w> for the forward map."""
+    dtype = jnp.complex128
+    mode = 'stencil'
+    op = HelmholtzOperator(
+      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      sigma_max=self.sigma_max, order=self.order, mode=mode, dtype=dtype
+    )
+    # Use tight tolerance for adjoint test to avoid solver noise
+    solver = HelmholtzSolver(op=op, gmres_options=GMRESOptions(tol=1e-9, maxiter=2000))
+    
+    # Map from eta -> sampled scattered field
+    forward_fun = create_forward_with_adjoint(solver, self.inc, self.projection_op)
+    
+    # Background perturbation - Try zero first to see if it matches test_vjp conditions
+    key = jax.random.PRNGKey(42)
+    eta_shape = (self.nxint * self.nyint,)
+    eta_0 = jnp.zeros(eta_shape, dtype=jnp.float64)
+    
+    # Perturbation direction v (model space)
+    k1, k2 = jax.random.split(key, 2)
+    v = jax.random.normal(k1, eta_shape, dtype=jnp.float64)
+    
+    # Random vector w (data space)
+    data_shape = (self.points_query.shape[0], self.n_theta)
+    w = jax.random.normal(k2, data_shape, dtype=dtype) + \
+        1j * jax.random.normal(k2, data_shape, dtype=dtype)
+    
+    # Linearization (Jv) using Finite Differences
+    epsilon = 1e-4
+    f_plus = forward_fun(eta_0 + epsilon * v)
+    f_minus = forward_fun(eta_0 - epsilon * v)
+    Jv = (f_plus - f_minus) / (2 * epsilon)
+    
+    # Adjoint (J^H w) using VJP
+    _, vjp_fun = jax.vjp(forward_fun, eta_0)
+    
+    g = vjp_fun(w)[0]
+    
+    # LHS = Re(w^T Jv) which is the correct JAX VJP identity
+    lhs_val = jnp.real(jnp.sum(Jv * w))
+    rhs_val = jnp.vdot(v, g)
+    
+    print(f"LHS: {lhs_val}, RHS: {rhs_val}")
+    
+    # Check that they have the same sign
+    self.assertTrue(lhs_val * rhs_val > 0, "Gradients should have the same sign")
+    
+    # Verify magnitude matches closely (within solver tolerance)
+    diff = jnp.abs(lhs_val - rhs_val)
+    mean = 0.5 * (jnp.abs(lhs_val) + jnp.abs(rhs_val))
+    self.assertLess(float(diff / mean), 1e-4)
+    
+  def flatten_complex(self, arr):
+    return arr.flatten()
 
 if __name__ == "__main__":
   unittest.main()

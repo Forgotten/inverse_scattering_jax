@@ -1,3 +1,5 @@
+import dataclasses
+from dataclasses import dataclass, field
 import jax
 import jax.numpy as jnp
 import jaxopt
@@ -5,6 +7,7 @@ from jax import custom_vjp
 from .helmholtz import HelmholtzSolver, extend_model, Array
 from typing import Callable, Tuple, Any, Optional
 
+@dataclass(slots=True, kw_only=True)
 class IncomingDirections:
   """Encapsulates incident waves from multiple directions.
 
@@ -17,38 +20,45 @@ class IncomingDirections:
     n_theta: Number of incident directions.
     x: 1D grid coordinates in x.
     y: 1D grid coordinates in y.
-    X: 2D meshgrid in x.
-    Y: 2D meshgrid in y.
+    grid_x: 2D meshgrid in x.
+    grid_y: 2D meshgrid in y.
     theta: Array of incident angles.
-    d: Array of incident direction vectors.
-    U_in: Incident wavefields for all directions.
+    directions: Array of incident direction vectors.
+    u_in: Incident wavefields for all directions.
   """
-  def __init__(
-    self, nx: int, ny: int, npml: int, h: float, omega: float, n_theta: int
-  ):
+  nx: int
+  ny: int
+  npml: int
+  h: float
+  omega: float
+  n_theta: int
+
+  # Computed fields (not initialized via generated __init__)
+  x: Array = field(init=False)
+  y: Array = field(init=False)
+  grid_x: Array = field(init=False)
+  grid_y: Array = field(init=False)
+  theta: Array = field(init=False)
+  directions: Array = field(init=False)
+  u_in: Array = field(init=False)
+
+  def __post_init__(self):
     """Initializes the incoming directions and precomputes incident waves."""
-    self.nx = nx
-    self.ny = ny
-    self.npml = npml
-    self.h = h
-    self.omega = omega
-    self.n_theta = n_theta
-    
     # Grid.
-    self.x = jnp.arange(nx) * h
-    self.y = jnp.arange(ny) * h
-    self.X, self.Y = jnp.meshgrid(self.x, self.y, indexing='ij')
+    self.x = (jnp.arange(self.nx) - self.npml - (self.nx - 2 * self.npml)//2) * self.h
+    self.y = (jnp.arange(self.ny) - self.npml - (self.ny - 2 * self.npml)//2) * self.h
+    self.grid_x, self.grid_y = jnp.meshgrid(self.x, self.y, indexing='ij')
     
     # Directions.
-    dtheta = 2 * jnp.pi / n_theta
-    self.theta = jnp.linspace(jnp.pi, 3 * jnp.pi - dtheta, n_theta)
-    self.d = jnp.stack([jnp.cos(self.theta), jnp.sin(self.theta)], axis=1)
+    dtheta = 2 * jnp.pi / self.n_theta
+    self.theta = jnp.linspace(jnp.pi, 3 * jnp.pi - dtheta, self.n_theta)
+    self.directions = jnp.stack([jnp.cos(self.theta), jnp.sin(self.theta)], axis=1)
     
     # Incident waves (nx * ny, n_theta).
-    self.U_in = jnp.exp(
-      1j * omega * (
-        self.X.flatten()[:, None] * self.d[:, 0] + 
-        self.Y.flatten()[:, None] * self.d[:, 1]
+    self.u_in = jnp.exp(
+      1j * self.omega * (
+        self.grid_x.flatten()[:, None] * self.directions[:, 0] + 
+        self.grid_y.flatten()[:, None] * self.directions[:, 1]
       )
     )
 
@@ -61,8 +71,8 @@ class IncomingDirections:
     Returns:
       Right-hand side vector for all incident directions.
     """
-    # S = -omega^2 * eta_ext * U_in.
-    return - (self.omega**2) * eta_ext.flatten()[:, None] * self.U_in
+    # S = -omega^2 * eta_ext * u_in.
+    return -(self.omega**2) * eta_ext.flatten()[:, None] * self.u_in
 
 def get_projection_op(
   x: Array, y: Array, points_query: Array
@@ -167,23 +177,40 @@ def create_forward_with_adjoint(
     return projection_op(u_0)
 
   def forward_fwd(eta: Array) -> Tuple[Array, Tuple[Array, Array]]:
-    u_0_scattered = forward_fun(eta)
     nxi = solver.nx - 2 * solver.npml
     nyi = solver.ny - 2 * solver.npml
     eta_ext = extend_model(eta, nxi, nyi, solver.npml)
     m_ext = 1.0 + eta_ext
     rhs = inc.get_rhs(eta_ext)
     
-    def solve_one(b):
+    def solve_one(b: Array) -> Array:
       sol, _ = solver.solve(b, m_ext)
       return sol
       
     u_0 = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
+    u_0_scattered = projection_op(u_0)
     return u_0_scattered, (eta, u_0)
 
   def forward_bwd(res: Tuple[Array, Array], v: Array) -> Tuple[Array]:
-    """Custom application of the adjoint of the Jacobian."""
+    """Computes the Vector-Jacobian Product (VJP) for the scattered field.
+
+    Mathematically, for a perturbation eta, we solve:
+      w = A^H \\ pt_v
+    where pt_v is the projected cotangent vector in the observation space,
+    and A is the Helmholtz operator. Since the operator A is complex symmetric, 
+    we compute the adjoint wavefield stably using:
+      w = conj( A^{-1} \\ conj(pt_v) )
+    to avoid PML boundary amplification instability.
+
+    Args:
+      res: Saved forward variables (eta, u_0) from the forward pass.
+      v: Cotangent vector corresponding to the scattered field outputs.
+
+    Returns:
+      A tuple containing the gradient vector with respect to the model perturbation eta.
+    """
     eta, u_0 = res
+    v = jnp.conj(v)
     nxi = solver.nx - 2 * solver.npml
     nyi = solver.ny - 2 * solver.npml
     npml = solver.npml
@@ -196,12 +223,12 @@ def create_forward_with_adjoint(
     pt_v = vjp_proj(v)[0]
     
     def solve_adj_one(b):
-      sol, _ = solver.solve_hermitian_adjoint(b, m_ext)
-      return sol
+      sol, _ = solver.solve(jnp.conj(b), m_ext)
+      return jnp.conj(sol)
       
     W = jax.vmap(solve_adj_one, in_axes=1, out_axes=1)(pt_v)
-    U_total = u_0 + inc.U_in
-    grad_ext = jnp.real(
+    U_total = u_0 + inc.u_in
+    grad_ext = - jnp.real(
       jnp.sum(jnp.conj(U_total) * W, axis=1)
     ) * (solver.omega**2)
     grad_ext = grad_ext.reshape((solver.ny, solver.nx))

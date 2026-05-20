@@ -119,14 +119,6 @@ class TestProjection(unittest.TestCase):
         key = jax.random.PRNGKey(10)
         idx_linear = jax.random.choice(key, self.nx * self.ny, (n_points,), replace=False)
         
-        # Convert to coordinates (remember meshgrid is 'xy' now, so X is (ny, nx))
-        # But wait, self.X.flatten() is row-major if X was created with 'xy'? 
-        # meshgrid(x, y, indexing='xy') -> X has shape (ny, nx). 
-        # X[i, j] = x[j]. Y[i, j] = y[i].
-        # Flattened layout: row-major (last index varies fastest). 
-        # So index k corresponds to (k // nx, k % nx) -> (y_idx, x_idx).
-        # X.flatten()[k] is the x-coordinate. Correct.
-        
         points_x = self.X.flatten()[idx_linear]
         points_y = self.Y.flatten()[idx_linear]
         points_query = jnp.stack([points_x, points_y], axis=1)

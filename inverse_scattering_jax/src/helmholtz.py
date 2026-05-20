@@ -208,6 +208,7 @@ class GMRESOptions:
   tol: float = 1e-3
   maxiter: int = 1000
 
+@dataclasses.dataclass(slots=True, kw_only=True, eq=False)
 class HelmholtzOperator:
   """Helmholtz operator using JAX.
 
@@ -225,81 +226,89 @@ class HelmholtzOperator:
         'conv': convolution representation.
     dtype: Datatype for the computation and results.
   """
-  def __init__(
-    self, 
-    nx: int, 
-    ny: int, 
-    npml: int, 
-    h: float, 
-    omega: float, 
-    sigma_max: float, 
-    order: int = 2,
-    mode: Literal['matrix', 'stencil', 'conv'] = 'matrix',
-    dtype: Any = jnp.complex128
-  ):
-    """Initializes the Helmholtz operator."""
-    self.nx = nx
-    self.ny = ny
-    self.npml = npml
-    self.h = h
-    self.omega = omega
-    self.sigma_max = sigma_max
-    self.order = order
-    self.mode = mode
-    self.mode = mode
-    self._dtype = dtype
+  nx: int
+  ny: int
+  npml: int
+  h: float
+  omega: float
+  sigma_max: float
+  order: int = 2
+  mode: Literal['matrix', 'stencil', 'conv'] = 'matrix'
+  dtype: Any = dataclasses.field(default=jnp.complex128, repr=False)
+
+  # Computed fields (init=False)
+  sx: Array = dataclasses.field(init=False, repr=False)
+  sy: Array = dataclasses.field(init=False, repr=False)
+  sxp: Array = dataclasses.field(init=False, repr=False)
+  syp: Array = dataclasses.field(init=False, repr=False)
+  cx: Array = dataclasses.field(init=False, repr=False)
+  cy: Array = dataclasses.field(init=False, repr=False)
+  ax: Array = dataclasses.field(init=False, repr=False)
+  ay: Array = dataclasses.field(init=False, repr=False)
+  weights_1: Array = dataclasses.field(init=False, repr=False)
+  weights_2: Array = dataclasses.field(init=False, repr=False)
+  b_weights_1_start: Array = dataclasses.field(init=False, repr=False)
+  b_weights_1_end: Array = dataclasses.field(init=False, repr=False)
+  b_weights_2_start: Array = dataclasses.field(init=False, repr=False)
+  b_weights_2_end: Array = dataclasses.field(init=False, repr=False)
+
+  # Matrix mode fields
+  Dx1d: Array = dataclasses.field(init=False, repr=False)
+  Dy1d: Array = dataclasses.field(init=False, repr=False)
+  Dxx1d: Array = dataclasses.field(init=False, repr=False)
+  Dyy1d: Array = dataclasses.field(init=False, repr=False)
+
+  def __post_init__(self):
+    """Initializes the computed matrices and PML boundary grids."""
+    self.sx, self.sy, self.sxp, self.syp = distrib_pml(
+      self.nx, self.ny, self.npml, self.sigma_max
+    )
     
-    self.sx, self.sy, self.sxp, self.syp = distrib_pml(nx, ny, npml, sigma_max)
-    
-    denom_x = (1 + 1j / omega * self.sx)
-    denom_y = (1 + 1j / omega * self.sy)
-    self.cx = (1j / (omega * (npml - 1) * h) * self.sxp / denom_x**3).astype(dtype)
-    self.cy = (1j / (omega * (npml - 1) * h) * self.syp / denom_y**3).astype(dtype)
-    self.ax = (-1.0 / denom_x**2).astype(dtype)
-    self.ay = (-1.0 / denom_y**2).astype(dtype)
+    denom_x = (1 + 1j / self.omega * self.sx)
+    denom_y = (1 + 1j / self.omega * self.sy)
+    self.cx = -(1j / (self.omega * (self.npml - 1) * self.h) * self.sxp / denom_x**3).astype(self.dtype)
+    self.cy = -(1j / (self.omega * (self.npml - 1) * self.h) * self.syp / denom_y**3).astype(self.dtype)
+    self.ax = (1.0 / denom_x**2).astype(self.dtype)
+    self.ay = (1.0 / denom_y**2).astype(self.dtype)
     
     # Precompute weights.
     self.weights_1 = fd_weights(
-      float(order // 2), jnp.arange(order + 1), 1
-    ) / (h**1)
+      float(self.order // 2), jnp.arange(self.order + 1), 1
+    ) / (self.h**1)
     self.weights_2 = fd_weights(
-      float(order // 2), jnp.arange(order + 1), 2
-    ) / (h**2)
+      float(self.order // 2), jnp.arange(self.order + 1), 2
+    ) / (self.h**2)
     
     # Boundary weights.
-    b_range = range(order//2 - 1)
+    b_range = range(self.order//2 - 1)
     if list(b_range):
       self.b_weights_1_start = jnp.stack([
-        fd_weights(float(i), jnp.arange(order + 3), 1)[1:] / (h**1) 
+        fd_weights(float(i), jnp.arange(self.order + 3), 1)[1:] / (self.h**1) 
         for i in b_range
       ])
       self.b_weights_1_end = jnp.stack([
-        fd_weights(float(order + 2 - i), jnp.arange(order + 3), 1)[:-1] / (h**1) 
+        fd_weights(float(self.order + 2 - i), jnp.arange(self.order + 3), 1)[:-1] / (self.h**1) 
         for i in b_range
       ])
       self.b_weights_2_start = jnp.stack([
-        fd_weights(float(i), jnp.arange(order + 3), 2)[1:] / (h**2) 
+        fd_weights(float(i), jnp.arange(self.order + 3), 2)[1:] / (self.h**2) 
         for i in b_range
       ])
       self.b_weights_2_end = jnp.stack([
-        fd_weights(float(order + 2 - i), jnp.arange(order + 3), 2)[:-1] / (h**2) 
+        fd_weights(float(self.order + 2 - i), jnp.arange(self.order + 3), 2)[:-1] / (self.h**2) 
         for i in b_range
       ])
     else:
       self.b_weights_1_start = self.b_weights_1_end = \
         self.b_weights_2_start = self.b_weights_2_end = \
-        jnp.zeros((0, order+2))
+        jnp.zeros((0, self.order + 2))
 
-    if mode == 'matrix':
-      self.Dx1d = get_fd_1d_matrix(nx, h, order, 1).astype(dtype)
-      self.Dy1d = get_fd_1d_matrix(ny, h, order, 1).astype(dtype)
-      self.Dxx1d = get_fd_1d_matrix(nx, h, order, 2).astype(dtype)
-      self.Dyy1d = get_fd_1d_matrix(ny, h, order, 2).astype(dtype)
+    if self.mode == 'matrix':
+      self.Dx1d = get_fd_1d_matrix(self.nx, self.h, self.order, 1).astype(self.dtype)
+      self.Dy1d = get_fd_1d_matrix(self.ny, self.h, self.order, 1).astype(self.dtype)
+      self.Dxx1d = get_fd_1d_matrix(self.nx, self.h, self.order, 2).astype(self.dtype)
+      self.Dyy1d = get_fd_1d_matrix(self.ny, self.h, self.order, 2).astype(self.dtype)
 
-  @property
-  def dtype(self) -> Any:
-    """Datatype for the computation and results."""
-    return self._dtype
 
   @partial(jax.jit, static_argnums=(0, 2, 3))
   def _apply_2d_core(self, u: Array, dim: int, deriv: int) -> Array:
@@ -429,7 +438,7 @@ class HelmholtzOperator:
       Applied operator result (flattened).
     """
     u = u_vec.reshape((self.ny, self.nx))
-    res = - (self.omega**2) * m_ext.astype(self.dtype) * u
+    res = (self.omega**2) * m_ext.astype(self.dtype) * u
     res += self.cx * self.apply_Dx(u)
     res += self.cy * self.apply_Dy(u)
     res += self.ax * self.apply_Dxx(u)
@@ -448,7 +457,7 @@ class HelmholtzOperator:
       Applied hermitian operator result (flattened).
     """
     w = w_vec.reshape((self.ny, self.nx))
-    res = - jnp.conj(self.omega**2 * m_ext.astype(self.dtype)) * w
+    res = jnp.conj(self.omega**2 * m_ext.astype(self.dtype)) * w
     res += self._apply_derivative(jnp.conj(self.cx) * w, 0, 1, adjoint=True)
     res += self._apply_derivative(jnp.conj(self.cy) * w, 1, 1, adjoint=True)
     res += self._apply_derivative(jnp.conj(self.ax) * w, 0, 2, adjoint=True)
@@ -456,6 +465,7 @@ class HelmholtzOperator:
     return res.flatten()
 
 
+@dataclasses.dataclass(slots=True, kw_only=True, eq=False)
 class HelmholtzSolver:
   """Helmholtz solver that composes an Operator and a linear solver strategy.
   
@@ -463,14 +473,8 @@ class HelmholtzSolver:
     op: The Helmholtz operator instance.
     gmres_options: Options for the GMRES solver.
   """
-  def __init__(
-    self, 
-    op: Operator, 
-    gmres_options: GMRESOptions = GMRESOptions()
-  ):
-    """Initializes the solver with an operator and options."""
-    self.op = op
-    self.gmres_options = gmres_options
+  op: Operator
+  gmres_options: GMRESOptions = dataclasses.field(default_factory=GMRESOptions)
 
   @property
   def nx(self): 

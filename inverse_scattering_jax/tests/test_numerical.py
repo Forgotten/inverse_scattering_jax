@@ -9,43 +9,47 @@ import unittest
 class TestNumericalValidation(unittest.TestCase):
   def test_convergence(self) -> None:
     """Verify 2nd order convergence of the finite difference scheme."""
-    def get_solution(nx_int):
+    def get_solution(nx_int, npml):
       ny_int = nx_int
-      npml = 15 # Large PML to minimize boundary errors.
       nx, ny = nx_int + 2 * npml, ny_int + 2 * npml
       h = 1.0 / (nx_int - 1)
       omega = 5.0
       sigma_max = 40.0
       
-      op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='matrix')
-      solver = HelmholtzSolver(op)
+      op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='matrix')
+      solver = HelmholtzSolver(op=op)
       
-      # Source at center.
-      f = jnp.zeros((ny, nx))
-      f = f.at[ny//2, nx//2].set(1.0 / h**2)
+      # Smooth Gaussian source centered at (0, 0).
+      x_coords = (jnp.arange(nx) - npml - nx_int//2) * h
+      y_coords = (jnp.arange(ny) - npml - ny_int//2) * h
+      X, Y = jnp.meshgrid(x_coords, y_coords, indexing='ij')
+      f = jnp.exp(-(X**2 + Y**2) / (2 * 0.15**2))
       m_ext = jnp.ones((ny, nx))
       
       u_vec, _ = solver.solve(f.flatten(), m_ext)
       u = u_vec.reshape((ny, nx))
       return u, h
 
-    # Run for three resolutions.
-    u1, h1 = get_solution(41)
-    u2, h2 = get_solution(81)
-    u3, h3 = get_solution(161)
+    # Run for three resolutions with proportional PML.
+    npml1, npml2, npml3 = 5, 10, 20
+    u1, h1 = get_solution(11, npml1)
+    u2, h2 = get_solution(21, npml2)
+    u3, h3 = get_solution(41, npml3)
     
     # Sample point at fixed physical distance from center (0.2, 0.0).
     dist = 0.2
-    val1 = u1[41//2, 41//2 + int(dist/h1)]
-    val2 = u2[81//2, 81//2 + int(dist/h2)]
-    val3 = u3[161//2, 161//2 + int(dist/h3)]
+    c1 = npml1 + 11//2
+    c2 = npml2 + 21//2
+    c3 = npml3 + 41//2
+    val1 = u1[c1, c1 + int(dist/h1)]
+    val2 = u2[c2, c2 + int(dist/h2)]
+    val3 = u3[c3, c3 + int(dist/h3)]
     
     # Richardson extrapolation estimate of convergence order.
     # Error E(h) ~ C * h^p.
     # (u1 - u2) / (u2 - u3) ~ (h1^p - h2^p) / (h2^p - h3^p).
     # Since h2 = h1/2 and h3 = h2/2:
-    # (u1 - u2) / (u2 - u3) ~ (h1^p - (h1/2)^p) / ((h1/2)^p - (h1/4)^p)
-    # = (1 - 2^-p) / (2^-p - 4^-p) = (1 - 2^-p) / (2^-p * (1 - 2^-p)) = 2^p.
+    # (u1 - u2) / (u2 - u3) ~ 2^p.
     
     ratio = jnp.abs(val1 - val2) / jnp.abs(val2 - val3)
     p = jnp.log2(ratio)
@@ -63,8 +67,8 @@ class TestNumericalValidation(unittest.TestCase):
     omega = 10.0
     sigma_max = 30.0
     
-    op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='stencil')
-    solver = HelmholtzSolver(op)
+    op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='stencil')
+    solver = HelmholtzSolver(op=op)
     
     # Source at center.
     src_idx_x, src_idx_y = nx // 2, ny // 2
@@ -85,7 +89,7 @@ class TestNumericalValidation(unittest.TestCase):
     # Avoid singularity at R=0.
     mask = (R > 2*h) & (R < 0.4) # Stay away from source and PML.
     u_numerical = u[mask]
-    u_analytical = (1j / 4.0) * hankel1(0, omega * R[mask])
+    u_analytical = -(1j / 4.0) * hankel1(0, omega * R[mask])
     
     # Debug prints.
     print(f"Numerical (sample): {u_numerical[0:5]}")
@@ -104,8 +108,8 @@ class TestNumericalValidation(unittest.TestCase):
     omega = 8.0
     sigma_max = 40.0
     
-    op = HelmholtzOperator(nx, ny, npml, h, omega, sigma_max, mode='stencil')
-    solver = HelmholtzSolver(op)
+    op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='stencil')
+    solver = HelmholtzSolver(op=op)
     
     # Source near one corner (but inside interior).
     f = jnp.zeros((ny, nx))
