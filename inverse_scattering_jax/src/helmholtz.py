@@ -161,22 +161,29 @@ def distrib_pml(
     fac: Maximum PML damping.
 
   Returns:
-    Tule of (sigma_x, sigma_y, sigma_xp, sigma_yp) arrays.
+    Tuple of (sigma_x, sigma_y, sigma_xp, sigma_yp) arrays.
   """
   t = jnp.linspace(0, 1, npml)
-  sigma_x = jnp.zeros((ny, nx)).at[:, :npml].set(
-    fac * t[::-1]**2
-  ).at[:, -npml:].set(fac * t**2)
-  sigma_y = jnp.zeros((ny, nx)).at[:npml, :].set(
-    fac * t[:, None][::-1]**2
-  ).at[-npml:, :].set(fac * t[:, None]**2)
-  sigma_xp = jnp.zeros((ny, nx)).at[:, :npml].set(
-    -2 * fac * t[::-1]
-  ).at[:, -npml:].set(2 * fac * t)
-  sigma_yp = jnp.zeros((ny, nx)).at[:npml, :].set(
-    -2 * fac * t[:, None][::-1]
-  ).at[-npml:, :].set(2 * fac * t[:, None])
-  return sigma_x, sigma_y, sigma_xp, sigma_yp
+  # 1D ramps for sigma (quadratic) and its derivative (linear), at the left
+  # and right boundaries respectively.
+  sigma_l, sigma_r = fac * t[::-1]**2, fac * t**2
+  grad_l, grad_r = -2 * fac * t[::-1], 2 * fac * t
+
+  def ramp_1d(n: int, left: Array, right: Array) -> Array:
+    return jnp.zeros(n).at[:npml].set(left).at[-npml:].set(right)
+
+  sx_1d  = ramp_1d(nx, sigma_l, sigma_r)
+  sy_1d  = ramp_1d(ny, sigma_l, sigma_r)
+  sxp_1d = ramp_1d(nx, grad_l,  grad_r)
+  syp_1d = ramp_1d(ny, grad_l,  grad_r)
+
+  shape = (ny, nx)
+  return (
+    jnp.broadcast_to(sx_1d[None, :],  shape),
+    jnp.broadcast_to(sy_1d[:, None],  shape),
+    jnp.broadcast_to(sxp_1d[None, :], shape),
+    jnp.broadcast_to(syp_1d[:, None], shape),
+  )
 
 def extend_model(m: Array, nxint: int, nyint: int, npml: int) -> Array:
   """Extends the model from the interior to the full domain (including PML).
@@ -418,14 +425,14 @@ class HelmholtzOperator:
       Resulting field.
     """
     if self.mode == 'matrix':
-      if dim == 0:
-        mat = self.Dx1d if deriv == 1 else self.Dxx1d
-        if adjoint: mat = mat.T.conj()
-        return jax.vmap(lambda row: mat @ row)(u)
-      else:
-        mat = self.Dy1d if deriv == 1 else self.Dyy1d
-        if adjoint: mat = mat.T.conj()
-        return jax.vmap(lambda col: mat @ col, in_axes=1, out_axes=1)(u)
+      mat = {
+        (0, 1): self.Dx1d, (0, 2): self.Dxx1d,
+        (1, 1): self.Dy1d, (1, 2): self.Dyy1d,
+      }[(dim, deriv)]
+      if adjoint:
+        mat = mat.conj().T
+      # dim==0: apply along rows → u @ mat.T.  dim==1: along cols → mat @ u.
+      return u @ mat.T if dim == 0 else mat @ u
     
     def apply_f(field):
       return self._apply_2d_core(field, dim, deriv)
@@ -508,31 +515,28 @@ class HelmholtzSolver:
   op: Operator
   gmres_options: GMRESOptions = dataclasses.field(default_factory=GMRESOptions)
 
-  @property
-  def nx(self): 
-    """Grid size in x."""
-    return self.op.nx
+  # Forwarded for convenience — grid geometry lives on the operator.
+  nx = property(lambda self: self.op.nx)
+  ny = property(lambda self: self.op.ny)
+  npml = property(lambda self: self.op.npml)
+  h = property(lambda self: self.op.h)
+  omega = property(lambda self: self.op.omega)
 
-  @property
-  def ny(self): 
-    """Grid size in y."""
-    return self.op.ny
 
-  @property
-  def npml(self): 
-    """Number of PML layers."""
-    return self.op.npml
+  def _gmres(
+    self,
+    op_fun: Callable[[Array], Array],
+    b: Array,
+    x0: Optional[Array],
+  ) -> Tuple[Array, Any]:
+    """Runs GMRES with the configured options, casting inputs to op dtype."""
+    b = b.astype(self.op.dtype)
+    if x0 is not None:
+      x0 = x0.astype(self.op.dtype)
+    return sp_linalg.gmres(
+      op_fun, b, x0=x0, **dataclasses.asdict(self.gmres_options)
+    )
 
-  @property
-  def h(self): 
-    """Grid spacing."""
-    return self.op.h
-
-  @property
-  def omega(self): 
-    """Angular frequency."""
-    return self.op.omega
-  
   @partial(jax.jit, static_argnums=(0,))
   def solve(
     self, f_vec: Array, m_ext: Array, x0: Optional[Array] = None
@@ -547,18 +551,7 @@ class HelmholtzSolver:
     Returns:
       Tuple of (solution, info).
     """
-    # Ensure output-compatible dtypes.
-    # Ensure output-compatible dtypes.
-    f_vec = f_vec.astype(self.op.dtype)
-    if x0 is not None:
-      x0 = x0.astype(self.op.dtype)
-
-    def op_fun(u): return self.op.operator(u, m_ext)
-    gmres_kwargs = dataclasses.asdict(self.gmres_options)
-    sol, info = sp_linalg.gmres(
-      op_fun, f_vec, x0=x0, **gmres_kwargs
-    )
-    return sol, info
+    return self._gmres(lambda u: self.op.operator(u, m_ext), f_vec, x0)
 
   @partial(jax.jit, static_argnums=(0,))
   def solve_hermitian_adjoint(
@@ -574,14 +567,6 @@ class HelmholtzSolver:
     Returns:
       Tuple of (solution, info).
     """
-    # Ensure output-compatible dtypes.
-    g_vec = g_vec.astype(self.op.dtype)
-    if x0 is not None:
-      x0 = x0.astype(self.op.dtype)
-
-    def op_fun(w): return self.op.operator_adjoint(w, m_ext)
-    gmres_kwargs = dataclasses.asdict(self.gmres_options)
-    sol, info = sp_linalg.gmres(
-      op_fun, g_vec, x0=x0, **gmres_kwargs
+    return self._gmres(
+      lambda w: self.op.operator_adjoint(w, m_ext), g_vec, x0
     )
-    return sol, info

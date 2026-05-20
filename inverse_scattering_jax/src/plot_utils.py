@@ -107,43 +107,22 @@ class Plotting:
             figsize: Figure size.
         """
         u_plot = u.reshape((self.ny, self.nx))
-        
-        fig, axes = plt.subplots(1, 3, figsize=figsize)
-        
-        # Real part
-        im0 = axes[0].imshow(
-            np.real(u_plot),
-            extent=self.extent,
-            origin='lower',
-            cmap='seismic'
-        )
-        axes[0].set_title(f"{title_prefix} (Real)")
-        plt.colorbar(im0, ax=axes[0])
-        
-        # Imaginary part
-        im1 = axes[1].imshow(
-            np.imag(u_plot),
-            extent=self.extent,
-            origin='lower',
-            cmap='seismic'
-        )
-        axes[1].set_title(f"{title_prefix} (Imaginary)")
-        plt.colorbar(im1, ax=axes[1])
-        
-        # Absolute value
-        im2 = axes[2].imshow(
-            np.abs(u_plot),
-            extent=self.extent,
-            origin='lower',
-            cmap='viridis'
-        )
-        axes[2].set_title(f"{title_prefix} (Absolute)")
-        plt.colorbar(im2, ax=axes[2])
+        panels = [
+            (np.real, "Real",      "seismic"),
+            (np.imag, "Imaginary", "seismic"),
+            (np.abs,  "Absolute",  "viridis"),
+        ]
 
-        for ax in axes:
+        fig, axes = plt.subplots(1, 3, figsize=figsize)
+        for ax, (op, label, cmap) in zip(axes, panels):
+            im = ax.imshow(
+                op(u_plot), extent=self.extent, origin='lower', cmap=cmap
+            )
+            ax.set_title(f"{title_prefix} ({label})")
             ax.set_xlabel("x")
             ax.set_ylabel("y")
+            plt.colorbar(im, ax=ax)
             if show_limits:
                 self._add_domain_limits(ax)
-        
+
         plt.tight_layout()

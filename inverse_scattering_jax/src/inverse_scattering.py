@@ -102,6 +102,29 @@ def get_projection_op(
     
   return projection_op
 
+def _solve_all_directions(
+  solver: HelmholtzSolver, inc: 'IncomingDirections', eta: Array
+) -> Tuple[Array, Array]:
+  """Computes the scattered field for every incident direction.
+
+  Args:
+    solver: Helmholtz solver instance.
+    inc: Incoming directions instance.
+    eta: Model perturbation (interior, flattened).
+
+  Returns:
+    Tuple of (scattered field stacked over directions, extended model m_ext).
+  """
+  nxi = solver.nx - 2 * solver.npml
+  nyi = solver.ny - 2 * solver.npml
+  eta_ext = extend_model(eta, nxi, nyi, solver.npml)
+  m_ext = 1.0 + eta_ext
+  rhs = inc.get_rhs(eta_ext)
+  u_0 = jax.vmap(
+    lambda b: solver.solve(b, m_ext)[0], in_axes=1, out_axes=1
+  )(rhs)
+  return u_0, m_ext
+
 class ForwardModel:
   """High-level forward model for the scattering problem.
 
@@ -111,9 +134,9 @@ class ForwardModel:
     projection_op: Operator to sample the scattered field.
   """
   def __init__(
-    self, 
-    solver: HelmholtzSolver, 
-    inc: IncomingDirections, 
+    self,
+    solver: HelmholtzSolver,
+    inc: IncomingDirections,
     projection_op: Optional[Callable[[Array], Array]] = None
   ):
     """Initializes the forward model."""
@@ -131,22 +154,12 @@ class ForwardModel:
     Returns:
       Scattered field sampled at observation points.
     """
-    nxi = self.solver.nx - 2 * self.solver.npml
-    nyi = self.solver.ny - 2 * self.solver.npml
-    eta_ext = extend_model(eta, nxi, nyi, self.solver.npml)
-    m_ext = 1.0 + eta_ext
-    rhs = self.inc.get_rhs(eta_ext)
-    
-    def solve_one(b: Array) -> Array:
-      sol, _ = self.solver.solve(b, m_ext)
-      return sol
-    
-    U = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
-    return self.projection_op(U)
+    u_0, _ = _solve_all_directions(self.solver, self.inc, eta)
+    return self.projection_op(u_0)
 
 def create_forward_with_adjoint(
-  solver: HelmholtzSolver, 
-  inc: IncomingDirections, 
+  solver: HelmholtzSolver,
+  inc: IncomingDirections,
   projection_op: Callable[[Array], Array]
 ) -> Callable[[Array], Array]:
   """
@@ -160,36 +173,15 @@ def create_forward_with_adjoint(
   Returns:
     Function mapping eta to scattered field with custom adjoint support.
   """
-  
+
   @custom_vjp
   def forward_fun(eta: Array) -> Array:
-    nxi = solver.nx - 2 * solver.npml
-    nyi = solver.ny - 2 * solver.npml
-    eta_ext = extend_model(eta, nxi, nyi, solver.npml)
-    m_ext = 1.0 + eta_ext
-    rhs = inc.get_rhs(eta_ext)
-    
-    def solve_one(b: Array) -> Array:
-      sol, _ = solver.solve(b, m_ext)
-      return sol
-    
-    u_0 = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
+    u_0, _ = _solve_all_directions(solver, inc, eta)
     return projection_op(u_0)
 
   def forward_fwd(eta: Array) -> Tuple[Array, Tuple[Array, Array]]:
-    nxi = solver.nx - 2 * solver.npml
-    nyi = solver.ny - 2 * solver.npml
-    eta_ext = extend_model(eta, nxi, nyi, solver.npml)
-    m_ext = 1.0 + eta_ext
-    rhs = inc.get_rhs(eta_ext)
-    
-    def solve_one(b: Array) -> Array:
-      sol, _ = solver.solve(b, m_ext)
-      return sol
-      
-    u_0 = jax.vmap(solve_one, in_axes=1, out_axes=1)(rhs)
-    u_0_scattered = projection_op(u_0)
-    return u_0_scattered, (eta, u_0)
+    u_0, _ = _solve_all_directions(solver, inc, eta)
+    return projection_op(u_0), (eta, u_0)
 
   def forward_bwd(res: Tuple[Array, Array], v: Array) -> Tuple[Array]:
     """Computes the Vector-Jacobian Product (VJP) for the scattered field.
@@ -197,7 +189,7 @@ def create_forward_with_adjoint(
     Mathematically, for a perturbation eta, we solve:
       w = A^H \\ pt_v
     where pt_v is the projected cotangent vector in the observation space,
-    and A is the Helmholtz operator. Since the operator A is complex symmetric, 
+    and A is the Helmholtz operator. Since the operator A is complex symmetric,
     we compute the adjoint wavefield stably using:
       w = conj( A^{-1} \\ conj(pt_v) )
     to avoid PML boundary amplification instability.
@@ -210,30 +202,24 @@ def create_forward_with_adjoint(
       A tuple containing the gradient vector with respect to the model perturbation eta.
     """
     eta, u_0 = res
-    v = jnp.conj(v)
-    nxi = solver.nx - 2 * solver.npml
-    nyi = solver.ny - 2 * solver.npml
     npml = solver.npml
-    
-    eta_ext = extend_model(eta, nxi, nyi, npml)
-    m_ext = 1.0 + eta_ext
-    
-    # check if this is correct.
+    nxi = solver.nx - 2 * npml
+    nyi = solver.ny - 2 * npml
+    m_ext = 1.0 + extend_model(eta, nxi, nyi, npml)
+
     _, vjp_proj = jax.vjp(projection_op, u_0)
-    pt_v = vjp_proj(v)[0]
-    
-    def solve_adj_one(b):
+    pt_v = vjp_proj(jnp.conj(v))[0]
+
+    def solve_adj_one(b: Array) -> Array:
       sol, _ = solver.solve(jnp.conj(b), m_ext)
       return jnp.conj(sol)
-      
+
     W = jax.vmap(solve_adj_one, in_axes=1, out_axes=1)(pt_v)
     U_total = u_0 + inc.u_in
     grad_ext = - jnp.real(
       jnp.sum(jnp.conj(U_total) * W, axis=1)
     ) * (solver.omega**2)
-    grad_ext = grad_ext.reshape((solver.ny, solver.nx))
-    grad = grad_ext[npml:-npml, npml:-npml]
-    
+    grad = grad_ext.reshape((solver.ny, solver.nx))[npml:-npml, npml:-npml]
     return (grad.flatten(),)
 
   forward_fun.defvjp(forward_fwd, forward_bwd)
@@ -258,11 +244,10 @@ def misfit(
   return 0.5 * jnp.sum(jnp.abs(diff)**2)
 
 def solve_inverse_problem(
-  eta_init: Array, 
-  forward_fun: Callable[[Array], Array], 
-  data: Array, 
-  maxiter: int = 50, 
-  learning_rate: float = 1e-2
+  eta_init: Array,
+  forward_fun: Callable[[Array], Array],
+  data: Array,
+  maxiter: int = 50,
 ) -> Tuple[Array, Any]:
   """
   Solves the inverse scattering problem using L-BFGS.
@@ -272,7 +257,6 @@ def solve_inverse_problem(
     forward_fun: Forward model function (with adjoint support).
     data: Target observation data.
     maxiter: Maximum L-BFGS iterations.
-    learning_rate: Learning rate (not directly used by JAXOpt L-BFGS).
 
   Returns:
     Tuple of (optimized parameters, final state).
