@@ -3,7 +3,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import lax
 import jax.scipy.sparse.linalg as sp_linalg
-from functools import partial
+from functools import partial, cached_property
 import dataclasses
 from typing import Tuple, Optional, Callable, Any, Union, Literal, Protocol
 
@@ -208,9 +208,12 @@ class GMRESOptions:
   tol: float = 1e-3
   maxiter: int = 1000
 
-@dataclasses.dataclass(slots=True, kw_only=True, eq=False)
+@dataclasses.dataclass(kw_only=True, eq=False)
 class HelmholtzOperator:
   """Helmholtz operator using JAX.
+
+  Derived quantities (PML profiles, FD weights, dense FD matrices) are
+  built lazily on first access via ``cached_property`` and reused thereafter.
 
   Attributes:
     nx: Total grid size in x.
@@ -236,78 +239,107 @@ class HelmholtzOperator:
   mode: Literal['matrix', 'stencil', 'conv'] = 'matrix'
   dtype: Any = dataclasses.field(default=jnp.complex128, repr=False)
 
-  # Computed fields (init=False)
-  sx: Array = dataclasses.field(init=False, repr=False)
-  sy: Array = dataclasses.field(init=False, repr=False)
-  sxp: Array = dataclasses.field(init=False, repr=False)
-  syp: Array = dataclasses.field(init=False, repr=False)
-  cx: Array = dataclasses.field(init=False, repr=False)
-  cy: Array = dataclasses.field(init=False, repr=False)
-  ax: Array = dataclasses.field(init=False, repr=False)
-  ay: Array = dataclasses.field(init=False, repr=False)
-  weights_1: Array = dataclasses.field(init=False, repr=False)
-  weights_2: Array = dataclasses.field(init=False, repr=False)
-  b_weights_1_start: Array = dataclasses.field(init=False, repr=False)
-  b_weights_1_end: Array = dataclasses.field(init=False, repr=False)
-  b_weights_2_start: Array = dataclasses.field(init=False, repr=False)
-  b_weights_2_end: Array = dataclasses.field(init=False, repr=False)
+  # --- PML profiles ---
+  @cached_property
+  def _pml(self) -> Tuple[Array, Array, Array, Array]:
+    return distrib_pml(self.nx, self.ny, self.npml, self.sigma_max)
 
-  # Matrix mode fields
-  Dx1d: Array = dataclasses.field(init=False, repr=False)
-  Dy1d: Array = dataclasses.field(init=False, repr=False)
-  Dxx1d: Array = dataclasses.field(init=False, repr=False)
-  Dyy1d: Array = dataclasses.field(init=False, repr=False)
+  @cached_property
+  def sx(self) -> Array: return self._pml[0]
+  @cached_property
+  def sy(self) -> Array: return self._pml[1]
+  @cached_property
+  def sxp(self) -> Array: return self._pml[2]
+  @cached_property
+  def syp(self) -> Array: return self._pml[3]
+
+  # --- PML-damped operator coefficients ---
+  @cached_property
+  def _denom_x(self) -> Array: return 1 + 1j / self.omega * self.sx
+  @cached_property
+  def _denom_y(self) -> Array: return 1 + 1j / self.omega * self.sy
+
+  @cached_property
+  def _c_scale(self) -> complex:
+    return 1j / (self.omega * (self.npml - 1) * self.h)
+
+  @cached_property
+  def cx(self) -> Array:
+    return (-self._c_scale * self.sxp / self._denom_x**3).astype(self.dtype)
+  @cached_property
+  def cy(self) -> Array:
+    return (-self._c_scale * self.syp / self._denom_y**3).astype(self.dtype)
+  @cached_property
+  def ax(self) -> Array: return (1.0 / self._denom_x**2).astype(self.dtype)
+  @cached_property
+  def ay(self) -> Array: return (1.0 / self._denom_y**2).astype(self.dtype)
+
+  # --- Interior FD weights ---
+  @cached_property
+  def weights_1(self) -> Array:
+    return fd_weights(
+      float(self.order // 2), jnp.arange(self.order + 1), 1
+    ) / self.h
+  @cached_property
+  def weights_2(self) -> Array:
+    return fd_weights(
+      float(self.order // 2), jnp.arange(self.order + 1), 2
+    ) / self.h**2
+
+  # --- Boundary FD weights (one helper, four cached views) ---
+  def _boundary_weights(
+    self, deriv: int, side: Literal['start', 'end']
+  ) -> Array:
+    b_range = range(self.order // 2 - 1)
+    if not b_range:
+      return jnp.zeros((0, self.order + 2))
+    nodes = jnp.arange(self.order + 3)
+    h_scale = self.h ** deriv
+    if side == 'start':
+      return jnp.stack([
+        fd_weights(float(i), nodes, deriv)[1:] / h_scale for i in b_range
+      ])
+    return jnp.stack([
+      fd_weights(float(self.order + 2 - i), nodes, deriv)[:-1] / h_scale
+      for i in b_range
+    ])
+
+  @cached_property
+  def b_weights_1_start(self) -> Array: return self._boundary_weights(1, 'start')
+  @cached_property
+  def b_weights_1_end(self) -> Array: return self._boundary_weights(1, 'end')
+  @cached_property
+  def b_weights_2_start(self) -> Array: return self._boundary_weights(2, 'start')
+  @cached_property
+  def b_weights_2_end(self) -> Array: return self._boundary_weights(2, 'end')
+
+  # --- Dense 1D FD matrices (only materialised in 'matrix' mode) ---
+  @cached_property
+  def Dx1d(self) -> Array:
+    return get_fd_1d_matrix(self.nx, self.h, self.order, 1).astype(self.dtype)
+  @cached_property
+  def Dy1d(self) -> Array:
+    return get_fd_1d_matrix(self.ny, self.h, self.order, 1).astype(self.dtype)
+  @cached_property
+  def Dxx1d(self) -> Array:
+    return get_fd_1d_matrix(self.nx, self.h, self.order, 2).astype(self.dtype)
+  @cached_property
+  def Dyy1d(self) -> Array:
+    return get_fd_1d_matrix(self.ny, self.h, self.order, 2).astype(self.dtype)
 
   def __post_init__(self):
-    """Initializes the computed matrices and PML boundary grids."""
-    self.sx, self.sy, self.sxp, self.syp = distrib_pml(
-      self.nx, self.ny, self.npml, self.sigma_max
-    )
-    
-    denom_x = (1 + 1j / self.omega * self.sx)
-    denom_y = (1 + 1j / self.omega * self.sy)
-    self.cx = -(1j / (self.omega * (self.npml - 1) * self.h) * self.sxp / denom_x**3).astype(self.dtype)
-    self.cy = -(1j / (self.omega * (self.npml - 1) * self.h) * self.syp / denom_y**3).astype(self.dtype)
-    self.ax = (1.0 / denom_x**2).astype(self.dtype)
-    self.ay = (1.0 / denom_y**2).astype(self.dtype)
-    
-    # Precompute weights.
-    self.weights_1 = fd_weights(
-      float(self.order // 2), jnp.arange(self.order + 1), 1
-    ) / (self.h**1)
-    self.weights_2 = fd_weights(
-      float(self.order // 2), jnp.arange(self.order + 1), 2
-    ) / (self.h**2)
-    
-    # Boundary weights.
-    b_range = range(self.order//2 - 1)
-    if list(b_range):
-      self.b_weights_1_start = jnp.stack([
-        fd_weights(float(i), jnp.arange(self.order + 3), 1)[1:] / (self.h**1) 
-        for i in b_range
-      ])
-      self.b_weights_1_end = jnp.stack([
-        fd_weights(float(self.order + 2 - i), jnp.arange(self.order + 3), 1)[:-1] / (self.h**1) 
-        for i in b_range
-      ])
-      self.b_weights_2_start = jnp.stack([
-        fd_weights(float(i), jnp.arange(self.order + 3), 2)[1:] / (self.h**2) 
-        for i in b_range
-      ])
-      self.b_weights_2_end = jnp.stack([
-        fd_weights(float(self.order + 2 - i), jnp.arange(self.order + 3), 2)[:-1] / (self.h**2) 
-        for i in b_range
-      ])
-    else:
-      self.b_weights_1_start = self.b_weights_1_end = \
-        self.b_weights_2_start = self.b_weights_2_end = \
-        jnp.zeros((0, self.order + 2))
-
+    """Warm mode-relevant cached properties so they materialise as concrete
+    arrays before any JIT trace. Without this, the first jitted call would
+    evaluate them inside a tracing context and cache tracers — which then
+    leak on subsequent calls.
+    """
+    _ = self.cx, self.cy, self.ax, self.ay
     if self.mode == 'matrix':
-      self.Dx1d = get_fd_1d_matrix(self.nx, self.h, self.order, 1).astype(self.dtype)
-      self.Dy1d = get_fd_1d_matrix(self.ny, self.h, self.order, 1).astype(self.dtype)
-      self.Dxx1d = get_fd_1d_matrix(self.nx, self.h, self.order, 2).astype(self.dtype)
-      self.Dyy1d = get_fd_1d_matrix(self.ny, self.h, self.order, 2).astype(self.dtype)
+      _ = self.Dx1d, self.Dy1d, self.Dxx1d, self.Dyy1d
+    else:
+      _ = (self.weights_1, self.weights_2,
+           self.b_weights_1_start, self.b_weights_1_end,
+           self.b_weights_2_start, self.b_weights_2_end)
 
 
   @partial(jax.jit, static_argnums=(0, 2, 3))
