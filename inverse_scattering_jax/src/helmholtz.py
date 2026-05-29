@@ -197,12 +197,8 @@ def extend_model(m: Array, nxint: int, nyint: int, npml: int) -> Array:
   Returns:
     Extended model parameters with zero padding in PML.
   """
-  m = m.reshape((nyint, nxint))
-  ny = nyint + 2 * npml
-  nx = nxint + 2 * npml
-  m_ext = jnp.zeros((ny, nx))
-  m_ext = m_ext.at[npml:-npml, npml:-npml].set(m)
-  return m_ext
+  domain = Domain(nx=nxint + 2 * npml, ny=nyint + 2 * npml, npml=npml, h=1.0)
+  return domain.extend_model(m)
 
 @dataclasses.dataclass
 class GMRESOptions:
@@ -215,6 +211,67 @@ class GMRESOptions:
   tol: float = 1e-3
   maxiter: int = 1000
 
+@dataclasses.dataclass(frozen=True, slots=True)
+class Domain:
+  """Discretization domain configuration.
+
+  Attributes:
+    nx: Grid size in x (including PML).
+    ny: Grid size in y (including PML).
+    npml: Number of PML layers.
+    h: Grid spacing.
+  """
+  nx: int
+  ny: int
+  npml: int
+  h: float
+
+  @property
+  def nxint(self) -> int:
+    """Interior grid size in x."""
+    return self.nx - 2 * self.npml
+
+  @property
+  def nyint(self) -> int:
+    """Interior grid size in y."""
+    return self.ny - 2 * self.npml
+
+  @property
+  def x(self) -> Array:
+    """1D grid coordinates in x."""
+    return (jnp.arange(self.nx) - self.npml - self.nxint // 2) * self.h
+
+  @property
+  def y(self) -> Array:
+    """1D grid coordinates in y."""
+    return (jnp.arange(self.ny) - self.npml - self.nyint // 2) * self.h
+
+  @property
+  def grid_x(self) -> Array:
+    """2D meshgrid in x."""
+    grid_x, _ = jnp.meshgrid(self.x, self.y, indexing='ij')
+    return grid_x
+
+  @property
+  def grid_y(self) -> Array:
+    """2D meshgrid in y."""
+    _, grid_y = jnp.meshgrid(self.x, self.y, indexing='ij')
+    return grid_y
+
+  def extend_model(self, m: Array) -> Array:
+    """Extends the model from the interior to the full domain (including PML).
+
+    Args:
+      m: Interior model parameters.
+
+    Returns:
+      Extended model parameters with zero padding in PML.
+    """
+    m = m.reshape((self.nyint, self.nxint))
+    m_ext = jnp.zeros((self.ny, self.nx))
+    m_ext = m_ext.at[self.npml:-self.npml, self.npml:-self.npml].set(m)
+    return m_ext
+
 @dataclasses.dataclass(kw_only=True, eq=False)
 class HelmholtzOperator:
   """Helmholtz operator using JAX.
@@ -223,28 +280,35 @@ class HelmholtzOperator:
   built lazily on first access via ``cached_property`` and reused thereafter.
 
   Attributes:
-    nx: Total grid size in x.
-    ny: Total grid size in y.
-    npml: Number of PML layers.
-    h: Grid spacing.
+    domain: Discretization domain configuration.
     omega: Angular frequency.
     sigma_max: Maximum PML damping.
-    order: Accuracy order.
-    mode: Operator implementation mode ('matrix', 'stencil', 'conv').
-        'matrix': dense matrix representation per dimension.
-        'stencil': stencil representation for matrix-free multiplication.
-        'conv': convolution representation.
-    dtype: Datatype for the computation and results.
+    order: int = 2
+    mode: Literal['matrix', 'stencil', 'conv'] = 'matrix'
+    dtype: Any = dataclasses.field(default=jnp.complex128, repr=False)
   """
-  nx: int
-  ny: int
-  npml: int
-  h: float
+  domain: Domain
   omega: float
   sigma_max: float
   order: int = 2
   mode: Literal['matrix', 'stencil', 'conv'] = 'matrix'
   dtype: Any = dataclasses.field(default=jnp.complex128, repr=False)
+
+  @property
+  def nx(self) -> int:
+    return self.domain.nx
+
+  @property
+  def ny(self) -> int:
+    return self.domain.ny
+
+  @property
+  def npml(self) -> int:
+    return self.domain.npml
+
+  @property
+  def h(self) -> float:
+    return self.domain.h
 
   # --- PML profiles ---
   @cached_property

@@ -4,7 +4,7 @@ config.update("jax_enable_x64", True)
 import jax.numpy as jnp
 import unittest
 from inverse_scattering_jax.src.helmholtz import (
-  HelmholtzSolver, HelmholtzOperator, extend_model, Array, GMRESOptions
+  HelmholtzSolver, HelmholtzOperator, extend_model, Array, GMRESOptions, Domain
 )
 from inverse_scattering_jax.src.inverse_scattering import (
   IncomingDirections, 
@@ -28,15 +28,18 @@ class TestInverseScattering(unittest.TestCase):
     sigma_max: float = 10.0
     order: int = 2
     
+    # Domain.
+    domain = Domain(nx=nx, ny=ny, npml=npml, h=h)
+
     # Solver.
     op = HelmholtzOperator(
-      nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, order=order, mode='stencil'
+      domain=domain, omega=omega, sigma_max=sigma_max, order=order, mode='stencil'
     )
     solver = HelmholtzSolver(op=op)
     
     # Incoming directions.
     n_theta: int = 4
-    inc = IncomingDirections(nx=nx, ny=ny, npml=npml, h=h, omega=omega, n_theta=n_theta)
+    inc = IncomingDirections(domain=domain, omega=omega, n_theta=n_theta)
     
     # Projection (sample at some points).
     theta_r: Array = jnp.linspace(0, 2 * jnp.pi, 4)
@@ -44,11 +47,7 @@ class TestInverseScattering(unittest.TestCase):
       [jnp.cos(theta_r), jnp.sin(theta_r)], axis=1
     )
     
-    # Grid x, y including PML, shifted to be centered at 0.
-    x: Array = (jnp.arange(nx) - npml - nxint//2) * h
-    y: Array = (jnp.arange(ny) - npml - nyint//2) * h
-    
-    projection_op = get_projection_op(x, y, points_query)
+    projection_op = get_projection_op(domain.x, domain.y, points_query)
     
     # Forward model with custom adjoint.
     forward_fun = create_forward_with_adjoint(solver, inc, projection_op)
@@ -92,16 +91,15 @@ class TestInverseScattering(unittest.TestCase):
     h = 1.0 / (nxint - 1)
     omega, sigma_max = 2.0, 10.0
     
-    op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='stencil')
+    domain = Domain(nx=nx, ny=ny, npml=npml, h=h)
+    op = HelmholtzOperator(domain=domain, omega=omega, sigma_max=sigma_max, mode='stencil')
     solver = HelmholtzSolver(op=op, gmres_options=GMRESOptions(tol=1e-9, maxiter=2000))
-    inc = IncomingDirections(nx=nx, ny=ny, npml=npml, h=h, omega=omega, n_theta=4)
+    inc = IncomingDirections(domain=domain, omega=omega, n_theta=4)
     
     # Random sampling points.
     theta_r = jnp.linspace(0, 2 * jnp.pi, 5, endpoint=False)
     points_query = 0.4 * jnp.stack([jnp.cos(theta_r), jnp.sin(theta_r)], axis=1)
-    x = (jnp.arange(nx) - npml - nxint//2) * h
-    y = (jnp.arange(ny) - npml - nyint//2) * h
-    projection_op = get_projection_op(x, y, points_query)
+    projection_op = get_projection_op(domain.x, domain.y, points_query)
     forward_fun = create_forward_with_adjoint(solver, inc, projection_op)
     
     # Fake data.

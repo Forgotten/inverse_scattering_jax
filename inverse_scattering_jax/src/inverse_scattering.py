@@ -4,7 +4,7 @@ import jax
 import jax.numpy as jnp
 import jaxopt
 from jax import custom_vjp
-from .helmholtz import HelmholtzSolver, extend_model, Array
+from .helmholtz import HelmholtzSolver, extend_model, Array, Domain
 from typing import Callable, Tuple, Any, Optional
 
 @dataclass(slots=True, kw_only=True)
@@ -12,43 +12,57 @@ class IncomingDirections:
   """Encapsulates incident waves from multiple directions.
 
   Attributes:
-    nx: Grid size in x.
-    ny: Grid size in y.
-    npml: Number of PML layers.
-    h: Grid spacing.
+    domain: Discretization domain configuration.
     omega: Angular frequency.
     n_theta: Number of incident directions.
-    x: 1D grid coordinates in x.
-    y: 1D grid coordinates in y.
-    grid_x: 2D meshgrid in x.
-    grid_y: 2D meshgrid in y.
     theta: Array of incident angles.
     directions: Array of incident direction vectors.
     u_in: Incident wavefields for all directions.
   """
-  nx: int
-  ny: int
-  npml: int
-  h: float
+  domain: Domain
   omega: float
   n_theta: int
 
   # Computed fields (not initialized via generated __init__)
-  x: Array = field(init=False)
-  y: Array = field(init=False)
-  grid_x: Array = field(init=False)
-  grid_y: Array = field(init=False)
   theta: Array = field(init=False)
   directions: Array = field(init=False)
   u_in: Array = field(init=False)
 
+  # Convenience properties for backward compatibility and grid queries
+  @property
+  def nx(self) -> int:
+    return self.domain.nx
+
+  @property
+  def ny(self) -> int:
+    return self.domain.ny
+
+  @property
+  def npml(self) -> int:
+    return self.domain.npml
+
+  @property
+  def h(self) -> float:
+    return self.domain.h
+
+  @property
+  def x(self) -> Array:
+    return self.domain.x
+
+  @property
+  def y(self) -> Array:
+    return self.domain.y
+
+  @property
+  def grid_x(self) -> Array:
+    return self.domain.grid_x
+
+  @property
+  def grid_y(self) -> Array:
+    return self.domain.grid_y
+
   def __post_init__(self):
     """Initializes the incoming directions and precomputes incident waves."""
-    # Grid.
-    self.x = (jnp.arange(self.nx) - self.npml - (self.nx - 2 * self.npml)//2) * self.h
-    self.y = (jnp.arange(self.ny) - self.npml - (self.ny - 2 * self.npml)//2) * self.h
-    self.grid_x, self.grid_y = jnp.meshgrid(self.x, self.y, indexing='ij')
-    
     # Directions.
     dtheta = 2 * jnp.pi / self.n_theta
     self.theta = jnp.linspace(jnp.pi, 3 * jnp.pi - dtheta, self.n_theta)
@@ -115,9 +129,7 @@ def _solve_all_directions(
   Returns:
     Tuple of (scattered field stacked over directions, extended model m_ext).
   """
-  nxi = solver.nx - 2 * solver.npml
-  nyi = solver.ny - 2 * solver.npml
-  eta_ext = extend_model(eta, nxi, nyi, solver.npml)
+  eta_ext = solver.op.domain.extend_model(eta)
   m_ext = 1.0 + eta_ext
   rhs = inc.get_rhs(eta_ext)
   u_0 = jax.vmap(
@@ -202,10 +214,8 @@ def create_forward_with_adjoint(
       A tuple containing the gradient vector with respect to the model perturbation eta.
     """
     eta, u_0 = res
-    npml = solver.npml
-    nxi = solver.nx - 2 * npml
-    nyi = solver.ny - 2 * npml
-    m_ext = 1.0 + extend_model(eta, nxi, nyi, npml)
+    domain = solver.op.domain
+    m_ext = 1.0 + domain.extend_model(eta)
 
     _, vjp_proj = jax.vjp(projection_op, u_0)
     pt_v = vjp_proj(jnp.conj(v))[0]
@@ -215,11 +225,11 @@ def create_forward_with_adjoint(
       return jnp.conj(sol)
 
     W = jax.vmap(solve_adj_one, in_axes=1, out_axes=1)(pt_v)
-    U_total = u_0 + inc.u_in
+    u_total = u_0 + inc.u_in
     grad_ext = - jnp.real(
-      jnp.sum(jnp.conj(U_total) * W, axis=1)
+      jnp.sum(jnp.conj(u_total) * W, axis=1)
     ) * (solver.omega**2)
-    grad = grad_ext.reshape((solver.ny, solver.nx))[npml:-npml, npml:-npml]
+    grad = grad_ext.reshape((domain.ny, domain.nx))[domain.npml:-domain.npml, domain.npml:-domain.npml]
     return (grad.flatten(),)
 
   forward_fun.defvjp(forward_fwd, forward_bwd)

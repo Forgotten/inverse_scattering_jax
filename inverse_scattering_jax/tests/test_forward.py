@@ -2,7 +2,7 @@ import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, HelmholtzOperator, GMRESOptions
+from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, HelmholtzOperator, GMRESOptions, Domain
 from inverse_scattering_jax.src.inverse_scattering import (
   IncomingDirections, 
   create_forward_with_adjoint, 
@@ -23,8 +23,9 @@ class TestForwardProblem(parameterized.TestCase):
     self.order = 2
     
     self.n_theta = 4
+    self.domain = Domain(nx=self.nx, ny=self.ny, npml=self.npml, h=self.h)
     self.inc = IncomingDirections(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, n_theta=self.n_theta
+      domain=self.domain, omega=self.omega, n_theta=self.n_theta
     )
     
     # Sampling points.
@@ -33,9 +34,7 @@ class TestForwardProblem(parameterized.TestCase):
       [jnp.cos(theta_r), jnp.sin(theta_r)], axis=1
     )
     
-    x = (jnp.arange(self.nx) - self.npml - self.nxint//2) * self.h
-    y = (jnp.arange(self.ny) - self.npml - self.nyint//2) * self.h
-    self.projection_op = get_projection_op(x, y, self.points_query)
+    self.projection_op = get_projection_op(self.domain.x, self.domain.y, self.points_query)
 
   @parameterized.product(
     dtype=[jnp.complex128, jnp.complex64],
@@ -51,8 +50,9 @@ class TestForwardProblem(parameterized.TestCase):
     m_ext = 1.0 + jax.random.normal(key, (self.ny, self.nx), 
                                    dtype=jnp.float64 if dtype==jnp.complex128 else jnp.float32) * 0.1
     
+    local_domain = Domain(nx=self.nx, ny=self.ny, npml=self.npml, h=self.h)
     op = HelmholtzOperator(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      domain=local_domain, omega=self.omega, 
       sigma_max=self.sigma_max, order=self.order, mode=mode, dtype=dtype
     )
     # Using solver interface just for operator access if needed, but testing operator directly
@@ -73,13 +73,13 @@ class TestForwardProblem(parameterized.TestCase):
     m_ext = 1.0 + jax.random.normal(key, (self.ny, self.nx)) * 0.1
     
     op_ref = HelmholtzOperator(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      domain=self.domain, omega=self.omega, 
       sigma_max=self.sigma_max, order=self.order, mode='matrix'
     )
     res_ref = op_ref.operator(u_vec, m_ext)
     
     op = HelmholtzOperator(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      domain=self.domain, omega=self.omega, 
       sigma_max=self.sigma_max, order=self.order, mode=mode
     )
     res = op.operator(u_vec, m_ext)
@@ -91,7 +91,7 @@ class TestForwardProblem(parameterized.TestCase):
     """Verify the custom VJP via finite differences."""
     dtype = jnp.complex128
     op = HelmholtzOperator(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      domain=self.domain, omega=self.omega, 
       sigma_max=self.sigma_max, order=self.order, mode='stencil', dtype=dtype
     )
     # Solver needs operator and options
@@ -118,7 +118,7 @@ class TestForwardProblem(parameterized.TestCase):
 
   def test_forward_output_shape(self) -> None:
     op = HelmholtzOperator(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      domain=self.domain, omega=self.omega, 
       sigma_max=self.sigma_max, order=self.order, mode='stencil'
     )
     solver = HelmholtzSolver(op=op)
@@ -133,7 +133,7 @@ class TestForwardProblem(parameterized.TestCase):
     dtype = jnp.complex128
     mode = 'stencil'
     op = HelmholtzOperator(
-      nx=self.nx, ny=self.ny, npml=self.npml, h=self.h, omega=self.omega, 
+      domain=self.domain, omega=self.omega, 
       sigma_max=self.sigma_max, order=self.order, mode=mode, dtype=dtype
     )
     # Use tight tolerance for adjoint test to avoid solver noise

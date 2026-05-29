@@ -2,7 +2,7 @@ import jax
 from jax import config
 config.update("jax_enable_x64", True)
 import jax.numpy as jnp
-from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, HelmholtzOperator
+from inverse_scattering_jax.src.helmholtz import HelmholtzSolver, HelmholtzOperator, Domain
 from scipy.special import hankel1
 import unittest
 
@@ -16,13 +16,12 @@ class TestNumericalValidation(unittest.TestCase):
       omega = 5.0
       sigma_max = 40.0
       
-      op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='matrix')
+      domain = Domain(nx=nx, ny=ny, npml=npml, h=h)
+      op = HelmholtzOperator(domain=domain, omega=omega, sigma_max=sigma_max, mode='matrix')
       solver = HelmholtzSolver(op=op)
       
       # Smooth Gaussian source centered at (0, 0).
-      x_coords = (jnp.arange(nx) - npml - nx_int//2) * h
-      y_coords = (jnp.arange(ny) - npml - ny_int//2) * h
-      X, Y = jnp.meshgrid(x_coords, y_coords, indexing='ij')
+      X, Y = domain.grid_x, domain.grid_y
       f = jnp.exp(-(X**2 + Y**2) / (2 * 0.15**2))
       m_ext = jnp.ones((ny, nx))
       
@@ -67,7 +66,8 @@ class TestNumericalValidation(unittest.TestCase):
     omega = 10.0
     sigma_max = 30.0
     
-    op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='stencil')
+    domain = Domain(nx=nx, ny=ny, npml=npml, h=h)
+    op = HelmholtzOperator(domain=domain, omega=omega, sigma_max=sigma_max, mode='stencil')
     solver = HelmholtzSolver(op=op)
     
     # Source at center.
@@ -108,7 +108,8 @@ class TestNumericalValidation(unittest.TestCase):
     omega = 8.0
     sigma_max = 40.0
     
-    op = HelmholtzOperator(nx=nx, ny=ny, npml=npml, h=h, omega=omega, sigma_max=sigma_max, mode='stencil')
+    domain = Domain(nx=nx, ny=ny, npml=npml, h=h)
+    op = HelmholtzOperator(domain=domain, omega=omega, sigma_max=sigma_max, mode='stencil')
     solver = HelmholtzSolver(op=op)
     
     # Source near one corner (but inside interior).
