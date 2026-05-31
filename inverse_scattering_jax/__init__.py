@@ -7,3 +7,5 @@ from .src.inverse_scattering import (
   misfit,
   solve_inverse_problem
 )
+from .src.wave_equation import WaveOperator, WaveStepOptions
+from .src.waveholtz import WaveHoltzSolver, WaveHoltzOptions, filter_beta
